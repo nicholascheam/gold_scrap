@@ -54,14 +54,91 @@ set grid xtics ytics
 set key top left
 set datafile separator ","
 
-plot '$CSV_FILE' using 2:3 with linespoints title 'Bid Price', \
-     '' using 2:4 with linespoints title 'Ask Price'
+set style line 1 lc rgb '#0066cc' lw 2 pt 7 ps 0.5
+set style line 2 lc rgb '#cc0000' lw 2 pt 7 ps 0.5
+set style line 3 lc rgb '#009900' lw 3
+
+plot '$CSV_FILE' using 2:3 with linespoints ls 1 title 'Bid Price', \
+     '' using 2:4 with linespoints ls 2 title 'Ask Price', \
+     '' using 2:((\$3+\$4)/2) with lines ls 3 title 'Mid Price'
 EOF
     
     if [ -f "$output_file" ]; then
         echo "Created: $output_file"
     else
         echo "Error: Failed to create price plot"
+    fi
+}
+
+# Create bid-ask spread plot
+create_spread_plot() {
+    echo "Creating bid-ask spread plot..."
+    
+    local output_file="$PLOT_DIR/gold_spread.png"
+    
+    gnuplot << EOF
+set terminal pngcairo size 1200,600 enhanced font 'Verdana,10'
+set output '$output_file'
+set title 'Gold Price Bid-Ask Spread'
+set xlabel 'Time'
+set ylabel 'Spread (USD)'
+set xdata time
+set timefmt '%Y-%m-%d %H:%M:%S'
+set format x '%d/%m %H:%M'
+set xtics rotate by -45
+set grid xtics ytics
+set key top left
+set datafile separator ","
+
+set style line 1 lc rgb '#ff6600' lw 2 pt 7 ps 0.5
+
+plot '$CSV_FILE' using 2:(\$4-\$3) with linespoints ls 1 title 'Bid-Ask Spread'
+EOF
+    
+    if [ -f "$output_file" ]; then
+        echo "Created: $output_file"
+    else
+        echo "Error: Failed to create spread plot"
+    fi
+}
+
+# Create change analysis plot
+create_change_plot() {
+    echo "Creating price change analysis plot..."
+    
+    local output_file="$PLOT_DIR/gold_changes.png"
+    
+    gnuplot << EOF
+set terminal pngcairo size 1200,800 enhanced font 'Verdana,10'
+set output '$output_file'
+set title 'Gold Price Changes Analysis'
+set xlabel 'Time'
+set ylabel 'Change'
+set xdata time
+set timefmt '%Y-%m-%d %H:%M:%S'
+set format x '%d/%m %H:%M'
+set xtics rotate by -45
+set grid xtics ytics
+set datafile separator ","
+set multiplot layout 2,1
+
+set title 'Price Change (Absolute)'
+set ylabel 'Change (USD)'
+set style line 1 lc rgb '#9966cc' lw 2 pt 7 ps 0.5
+plot '$CSV_FILE' using 2:5 with linespoints ls 1 title 'Price Change'
+
+set title 'Price Change (Percentage)'
+set ylabel 'Change (%)'
+set style line 2 lc rgb '#ff3366' lw 2 pt 7 ps 0.5
+plot '$CSV_FILE' using 2:6 with linespoints ls 2 title 'Change %'
+
+unset multiplot
+EOF
+    
+    if [ -f "$output_file" ]; then
+        echo "Created: $output_file"
+    else
+        echo "Error: Failed to create change plot"
     fi
 }
 
@@ -80,11 +157,16 @@ main() {
         exit 1
     fi
     
-    # Create plot
+    # Create plots
     create_price_plot
+    create_spread_plot
+    create_change_plot
     
     echo ""
-    echo "Plot created: $PLOT_DIR/gold_prices_timeseries.png"
+    echo "Plots created in: $PLOT_DIR"
+    echo "  • gold_prices_timeseries.png"
+    echo "  • gold_spread.png"
+    echo "  • gold_changes.png"
 }
 
 # Run the script
