@@ -156,6 +156,60 @@ EOF
     fi
 }
 
+# Execute SQL to update database
+update_database() {
+    local bid="$1" ask="$2" change="$3" change_pct="$4" low="$5" high="$6"
+    
+    log_message "Attempting to update database $DB_NAME..."
+    
+    # Check MySQL connection
+    if ! mysql $MYSQL_USER $MYSQL_PASS -e "SELECT 1" 2>/dev/null; then
+        return 1
+    fi
+    
+    # Check if database exists
+    if ! mysql $MYSQL_USER $MYSQL_PASS -e "USE $DB_NAME" 2>/dev/null; then
+        # Create database from SQL file
+        mysql $MYSQL_USER $MYSQL_PASS < "$SQL_FILE" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            log_message "Database $DB_NAME created from SQL file"
+            return 0
+        else
+            log_message "Failed to create database from SQL file"
+            return 1
+        fi
+    fi
+    
+    # Database exists, insert new data
+    local temp_sql="$DATA_DIR/temp_insert_$(date +%s).sql"
+    
+    cat > "$temp_sql" << EOF
+USE $DB_NAME;
+
+-- Insert or update daily range
+INSERT INTO daily_ranges (date, day_low, day_high)
+VALUES ('$TODAY_DATE', $low, $high)
+ON DUPLICATE KEY UPDATE
+    day_low = LEAST(day_low, VALUES(day_low)),
+    day_high = GREATEST(day_high, VALUES(day_high));
+
+-- Insert new price observation
+INSERT INTO gold_prices (timestamp, bid_price, ask_price, change_amount, change_percent, date, source)
+VALUES ('$TIMESTAMP', $bid, $ask, $change, $change_pct, '$TODAY_DATE', 'kitco');
+EOF
+    
+    # Execute the insert
+    if mysql $MYSQL_USER $MYSQL_PASS < "$temp_sql" 2>/dev/null; then
+        log_message "Successfully updated database"
+        rm -f "$temp_sql"
+        return 0
+    else
+        log_message "Failed to update database"
+        rm -f "$temp_sql"
+        return 1
+    fi
+}
+
 # Main execution
 main() {
     echo "=== Gold Price Tracker ==="
@@ -193,6 +247,9 @@ main() {
     
     # Update SQL file
     update_sql_file "$bid" "$ask" "$change" "$change_pct" "$low" "$high"
+    
+    # Update database
+    update_database "$bid" "$ask" "$change" "$change_pct" "$low" "$high"
     
     log_message "=== Collection completed successfully ==="
 }
