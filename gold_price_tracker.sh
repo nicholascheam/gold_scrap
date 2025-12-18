@@ -1,22 +1,14 @@
 #!/bin/bash
-# gold_tracker_fixed.sh - Creates normalized tables with scraped data
+# gold_tracker.sh - Basic gold price scraper
 
 # Configuration
 URL="https://www.kitco.com/charts/livegold.html"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 TODAY_DATE=$(date '+%Y-%m-%d')
-DB_NAME="comp1314_db"
-
-# MySQL configuration
-MYSQL_USER="root"
-MYSQL_PASS=""  # Add password here if needed
 
 # Create data directory
 DATA_DIR="gold_tracker_data"
 mkdir -p "$DATA_DIR"
-
-CSV_FILE="$DATA_DIR/gold_prices.csv"
-SQL_FILE="$DATA_DIR/gold_dump_normalized.sql"
 LOG_FILE="$DATA_DIR/gold_tracker.log"
 
 # Logging function
@@ -43,10 +35,10 @@ scrape_gold_data() {
     local ask_price=$(echo "$html_content" | grep -oP '<div class="mr-0\.5 text-\[19px\] font-normal">\s*\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     
     # Extract Change
-    local change=$(echo "$html_content" | grep -oP 'CommodityPrice_up[^>]*>\+<!-- -->\K[0-9,]+\.?[0-9]*' | head -1)
+    local change=$(echo "$html_content" | grep -oP 'CommodityPrice_up[^>]*>\K[+-]?[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     
     # Extract Change Percentage
-    local change_percent=$(echo "$html_content" | grep -oP '\(<!-- -->\+<!-- -->\K[0-9,]+\.?[0-9]*' | head -1)
+    local change_percent=$(echo "$html_content" | grep -oP '\([+-][0-9,]+\.?[0-9]*%' | head -1 | tr -d ',()%')
     
     # Extract Day's Range
     local range_html=$(echo "$html_content" | grep -A 3 'CommodityPrice_priceToday__wBwVD')
@@ -65,28 +57,13 @@ scrape_gold_data() {
         return 1
     fi
     
-    # Use reasonable defaults if range not found
-    if [ -z "$day_low" ] || [ -z "$day_high" ]; then
-        day_low=$(echo "$bid_price - 50" | bc 2>/dev/null || echo "0")
-        day_high=$(echo "$bid_price + 50" | bc 2>/dev/null || echo "0")
-        log_message "Warning: Using calculated day range"
-    fi
-    
-    if [ -z "$change" ]; then
-        change="0.00"
-        log_message "Warning: Using default change value"
-    fi
-    
-    if [ -z "$change_percent" ]; then
-        change_percent="0.00"
-        log_message "Warning: Using default change percent"
-    fi
-    
-    log_message "Extracted data: bid=$bid_price, ask=$ask_price, change=$change, change_percent=$change_percent, low=$day_low, high=$day_high"
+    log_message "Extracted data: bid=$bid_price, ask=$ask_price, change=$change, change_percent=$change_percent"
     
     echo "$bid_price:$ask_price:$change:$change_percent:$day_low:$day_high"
     return 0
 }
+
+CSV_FILE="$DATA_DIR/gold_prices.csv"
 
 # Generate CSV file with appending
 generate_csv() {
@@ -104,6 +81,81 @@ generate_csv() {
     log_message "Appended data to CSV file: $CSV_FILE"
 }
 
+DB_NAME="comp1314_db"
+SQL_FILE="$DATA_DIR/gold_dump_normalized.sql"
+
+# Function to create the SQL file with multi-row INSERT format
+update_sql_file() {
+    local bid="$1" ask="$2" change="$3" change_pct="$4" low="$5" high="$6"
+    
+    log_message "Updating SQL file..."
+    
+    # Check if SQL file exists
+    if [ ! -f "$SQL_FILE" ]; then
+        # Create initial SQL file with table structure
+        cat > "$SQL_FILE" << EOF
+-- COMP1314 Coursework - Normalized Gold Price Database
+-- Initial creation: $(date '+%Y-%m-%d %H:%M:%S')
+
+-- Create fresh database
+DROP DATABASE IF EXISTS $DB_NAME;
+CREATE DATABASE $DB_NAME;
+USE $DB_NAME;
+
+-- Daily price ranges (one record per day)
+CREATE TABLE daily_ranges (
+    date DATE PRIMARY KEY,
+    day_low DECIMAL(10,2) NOT NULL,
+    day_high DECIMAL(10,2) NOT NULL,
+    range_spread DECIMAL(10,2) AS (day_high - day_low),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Price observations (multiple per day)
+CREATE TABLE gold_prices (
+    price_id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    bid_price DECIMAL(10,2) NOT NULL,
+    ask_price DECIMAL(10,2) NOT NULL,
+    spread DECIMAL(10,2) AS (ask_price - bid_price),
+    change_amount DECIMAL(10,2),
+    change_percent DECIMAL(10,4),
+    date DATE NOT NULL,
+    source VARCHAR(50) DEFAULT 'kitco',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY idx_unique_timestamp (timestamp, source),
+    FOREIGN KEY (date) REFERENCES daily_ranges(date)
+);
+
+-- INSERT DATA
+-- Daily ranges
+INSERT INTO daily_ranges (date, day_low, day_high) VALUES
+('$TODAY_DATE', $low, $high);
+
+-- Price observations
+INSERT INTO gold_prices (timestamp, bid_price, ask_price, change_amount, change_percent, date, source) VALUES
+('$TIMESTAMP', $bid, $ask, $change, $change_pct, '$TODAY_DATE', 'kitco');
+
+EOF
+        
+        log_message "Created new SQL file with database structure"
+        
+    else
+        # SQL file exists - update it
+        if ! grep -q "'$TODAY_DATE', $low, $high" "$SQL_FILE"; then
+            sed -i "/INSERT INTO daily_ranges.*VALUES/,/);/{
+                s/);$/),\n('$TODAY_DATE', $low, $high);/
+            }" "$SQL_FILE"
+        fi
+        
+        sed -i "/INSERT INTO gold_prices.*VALUES/,/);/{
+            s/);$/),\n('$TIMESTAMP', $bid, $ask, $change, $change_pct, '$TODAY_DATE', 'kitco');/
+        }" "$SQL_FILE"
+        
+        log_message "Added new price observation: $TIMESTAMP"
+    fi
+}
+
 # Main execution
 main() {
     echo "=== Gold Price Tracker ==="
@@ -118,27 +170,18 @@ main() {
     if [ $? -ne 0 ] || [ -z "$data" ]; then
         echo ""
         echo "Error: Failed to retrieve data from website."
-        echo "Check internet connection and website availability."
-        log_message "Failed to scrape data"
         exit 1
     fi
     
     IFS=':' read -r bid ask change change_pct low high <<< "$data"
-    
-    # Validate data is numeric
-    if ! [[ "$bid" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! [[ "$ask" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-        echo "Error: Invalid data format received."
-        log_message "Invalid data format: bid='$bid', ask='$ask'"
-        exit 1
-    fi
     
     echo ""
     echo "Gold Price Data Retrieved"
     echo "========================="
     printf "%-20s: $%s\n" "Bid Price" "$bid"
     printf "%-20s: $%s\n" "Ask Price" "$ask"
-    printf "%-20s: +%s\n" "Price Change" "$change"
-    printf "%-20s: +%s%%\n" "Change Percent" "$change_pct"
+    printf "%-20s: %s\n" "Price Change" "$change"
+    printf "%-20s: %s%%\n" "Change Percent" "$change_pct"
     printf "%-20s: $%s - $%s\n" "Day's Range" "$low" "$high"
     printf "%-20s: %s\n" "Collection Time" "$TIMESTAMP"
     printf "%-20s: %s\n" "Date" "$TODAY_DATE"
@@ -147,6 +190,9 @@ main() {
     
     # Generate CSV file
     generate_csv "$bid" "$ask" "$change" "$change_pct" "$low" "$high"
+    
+    # Update SQL file
+    update_sql_file "$bid" "$ask" "$change" "$change_pct" "$low" "$high"
     
     log_message "=== Collection completed successfully ==="
 }
