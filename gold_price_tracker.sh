@@ -88,6 +88,22 @@ scrape_gold_data() {
     return 0
 }
 
+# Generate CSV file with appending
+generate_csv() {
+    local bid="$1" ask="$2" change="$3" change_pct="$4" low="$5" high="$6"
+    
+    # Create CSV header if file doesn't exist
+    if [ ! -f "$CSV_FILE" ]; then
+        echo "date,timestamp,bid_price,ask_price,change_amount,change_percent,day_low,day_high,source" > "$CSV_FILE"
+        log_message "Created new CSV file with headers"
+    fi
+    
+    # Append data to CSV
+    echo "$TODAY_DATE,$TIMESTAMP,$bid,$ask,$change,$change_pct,$low,$high,kitco" >> "$CSV_FILE"
+    
+    log_message "Appended data to CSV file: $CSV_FILE"
+}
+
 # Main execution
 main() {
     echo "=== Gold Price Tracker ==="
@@ -128,6 +144,9 @@ main() {
     printf "%-20s: %s\n" "Date" "$TODAY_DATE"
     echo "========================="
     echo ""
+    
+    # Generate CSV file
+    generate_csv "$bid" "$ask" "$change" "$change_pct" "$low" "$high"
     
     log_message "=== Collection completed successfully ==="
 }
