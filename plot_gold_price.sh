@@ -102,6 +102,95 @@ EOF
     fi
 }
 
+# Create daily statistics plot
+create_daily_stats() {
+    echo "Creating daily statistics plot..."
+    
+    local output_file="$PLOT_DIR/gold_daily_stats.png"
+    
+    # Create daily summary using awk
+    local temp_summary="$PLOT_DIR/daily_summary.csv"
+    
+    awk -F, '
+    NR==1 { next }
+    {
+        date = \$1
+        bid = \$3
+        ask = \$4
+        
+        if (!(date in count)) {
+            count[date] = 0
+            min[date] = bid
+            max[date] = bid
+            sum_bid[date] = 0
+            sum_ask[date] = 0
+        }
+        
+        count[date]++
+        sum_bid[date] += bid
+        sum_ask[date] += ask
+        
+        if (bid < min[date]) min[date] = bid
+        if (bid > max[date]) max[date] = bid
+    }
+    END {
+        print "date,observations,avg_bid,avg_ask,min_price,max_price,range"
+        for (d in count) {
+            avg_bid = sum_bid[d] / count[d]
+            avg_ask = sum_ask[d] / count[d]
+            range = max[d] - min[d]
+            printf "%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n", d, count[d], avg_bid, avg_ask, min[d], max[d], range
+        }
+    }
+    ' "$CSV_FILE" | sort > "$temp_summary"
+    
+    gnuplot << EOF
+set terminal pngcairo size 1400,800 enhanced font 'Verdana,10'
+set output '$output_file'
+set title 'Daily Gold Price Statistics'
+set datafile separator ","
+set style data histogram
+set style histogram cluster gap 1
+set style fill solid border -1
+set boxwidth 0.8 relative
+set xtics rotate by -45
+
+set multiplot layout 2,2 title 'Daily Analysis'
+
+set title 'Average Daily Prices'
+set ylabel 'Price (USD)'
+set grid ytics
+plot '$temp_summary' using 3:xtic(1) title 'Avg Bid', \
+     '' using 4 title 'Avg Ask'
+
+set title 'Daily Price Range'
+set ylabel 'Range (USD)'
+set grid ytics
+plot '$temp_summary' using 7:xtic(1) with boxes lc rgb '#ff9900' title 'Daily Range'
+
+set title 'Observations per Day'
+set ylabel 'Count'
+set grid ytics
+plot '$temp_summary' using 2:xtic(1) with boxes lc rgb '#6699ff' title 'Observations'
+
+set title 'Daily Min/Max Prices'
+set ylabel 'Price (USD)'
+set grid ytics
+plot '$temp_summary' using 5:xtic(1) with linespoints lc rgb '#cc0000' title 'Min Price', \
+     '' using 6 with linespoints lc rgb '#009900' title 'Max Price'
+
+unset multiplot
+EOF
+    
+    if [ -f "$output_file" ]; then
+        echo "Created: $output_file"
+        rm -f "$temp_summary"
+    else
+        echo "Error: Failed to create daily stats plot"
+        [ -f "$temp_summary" ] && rm -f "$temp_summary"
+    fi
+}
+
 # Create change analysis plot
 create_change_plot() {
     echo "Creating price change analysis plot..."
@@ -160,12 +249,14 @@ main() {
     # Create plots
     create_price_plot
     create_spread_plot
+    create_daily_stats
     create_change_plot
     
     echo ""
     echo "Plots created in: $PLOT_DIR"
     echo "  • gold_prices_timeseries.png"
     echo "  • gold_spread.png"
+    echo "  • gold_daily_stats.png"
     echo "  • gold_changes.png"
 }
 
