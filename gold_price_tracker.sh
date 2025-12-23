@@ -1,5 +1,5 @@
 #!/bin/bash
-# gold_tracker_fixed.sh - Creates normalized tables with scraped data
+# gold_price_tracker.sh - Creates normalized tables with scraped data
 
 # Configuration
 URL="https://www.kitco.com/charts/livegold.html"
@@ -24,7 +24,7 @@ log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Web scraping function
+# Web scraping function - FIXED VERSION
 scrape_gold_data() {
     log_message "Attempting to scrape gold data from Kitco..."
     
@@ -42,15 +42,15 @@ scrape_gold_data() {
     # Extract Ask price
     local ask_price=$(echo "$html_content" | grep -oP '<div class="mr-0\.5 text-\[19px\] font-normal">\s*\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     
-    # Extract Change with sign
+    # Extract Change with sign - FIXED THIS SECTION
     local change=""
     
-    # Method 1: Look for change in CommodityPrice element
-    change=$(echo "$html_content" | grep -oP 'CommodityPrice_(up|down)[^>]*>\K[+-]?[0-9,]+\.?[0-9]*' | head -1)
+    # Method 1: Look for change in CommodityPrice element - FIXED REGEX
+    change=$(echo "$html_content" | grep -oP 'CommodityPrice_(up|down)[^>]*>[\s]*\K[+-]?[0-9,]+\.?[0-9]*' | head -1)
     
     if [ -z "$change" ]; then
-        # Method 2: Look for data-change attribute
-        change=$(echo "$html_content" | grep -oP 'data-change=["'\'']\K[+-]?[0-9,]+\.?[0-9]*' | head -1)
+        # Method 2: Look for data-change attribute - FIXED REGEX
+        change=$(echo "$html_content" | grep -oP 'data-change=["'\''][^"'\'']*["'\'']' | grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1)
     fi
     
     if [ -z "$change" ]; then
@@ -61,21 +61,56 @@ scrape_gold_data() {
     # Clean the change value
     change=$(echo "$change" | tr -d ',' | tr -d ' ')
     
-    # Determine if change is positive or negative
-    local change_sign="+"
-    if [[ "$change" =~ ^- ]]; then
-        change_sign="-"
-    elif echo "$html_content" | grep -q 'CommodityPrice_down'; then
-        change_sign="-"
-        # If change doesn't have sign but page shows down, add minus
-        if [[ "$change" =~ ^[0-9] ]]; then
-            change="-$change"
+    # CRITICAL FIX: Validate change is a reasonable number
+    if [ -n "$change" ]; then
+        # Remove sign for validation
+        local change_abs=$(echo "$change" | tr -d '+-')
+        
+        # Check if it's a valid number and reasonable for gold price changes
+        if [[ "$change_abs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            # Gold price changes are rarely > $100 in a single update
+            # Compare as floating point if bc is available
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "$change_abs > 100" | bc -l) )); then
+                    log_message "Warning: Unreasonable change value detected: $change, using default"
+                    change=""
+                fi
+            else
+                # Fallback: check if it looks like a huge number (more than 4 digits before decimal)
+                if [[ "$change_abs" =~ ^[0-9]{5,} ]]; then
+                    log_message "Warning: Very large change value: $change, using default"
+                    change=""
+                fi
+            fi
+        else
+            # Not a valid number
+            log_message "Warning: Invalid change format: $change, using default"
+            change=""
         fi
     fi
     
+    # Determine if change is positive or negative
+    local change_sign="+"
+    if echo "$html_content" | grep -q 'CommodityPrice_down'; then
+        change_sign="-"
+    elif [[ "$change" =~ ^- ]]; then
+        change_sign="-"
+    fi
+    
+    # If change doesn't have sign but page shows down, add minus
+    if [[ "$change" =~ ^[0-9] ]] && [[ "$change_sign" == "-" ]]; then
+        change="-$change"
+    fi
+    
     # If change has no sign, add the detected sign
-    if [[ "$change" =~ ^[0-9] ]]; then
+    if [[ "$change" =~ ^[0-9] ]] && [[ "$change_sign" == "+" ]]; then
         change="${change_sign}${change}"
+    fi
+    
+    # If still no valid change, use default with proper sign
+    if [ -z "$change" ]; then
+        change="${change_sign}0.00"
+        log_message "Using default change value: $change"
     fi
     
     # Extract Change Percentage
@@ -85,8 +120,8 @@ scrape_gold_data() {
     change_percent=$(echo "$html_content" | grep -oP '\([+-][0-9,]+\.?[0-9]*%' | head -1)
     
     if [ -z "$change_percent" ]; then
-        # Method 2: Look for data-change-percent attribute
-        change_percent=$(echo "$html_content" | grep -oP 'data-change-percent=["'\'']\K[+-]?[0-9,]+\.?[0-9]*' | head -1)
+        # Method 2: Look for data-change-percent attribute - FIXED REGEX
+        change_percent=$(echo "$html_content" | grep -oP 'data-change-percent=["'\''][^"'\'']*["'\'']' | grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1)
     fi
     
     if [ -z "$change_percent" ]; then
@@ -100,6 +135,31 @@ scrape_gold_data() {
     
     # Clean the percentage value
     change_percent=$(echo "$change_percent" | tr -d ', %()')
+    
+    # CRITICAL FIX: Validate percentage is reasonable
+    if [ -n "$change_percent" ]; then
+        # Remove sign for validation
+        local pct_abs=$(echo "$change_percent" | tr -d '+-')
+        
+        # Check if it's a valid number and reasonable (gold rarely moves > 10% in a day)
+        if [[ "$pct_abs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            if command -v bc >/dev/null 2>&1; then
+                if (( $(echo "$pct_abs > 10" | bc -l) )); then
+                    log_message "Warning: Unreasonable percentage detected: $change_percent, using default")
+                    change_percent=""
+                fi
+            else
+                # Fallback: check if it looks like a huge percentage
+                if [[ "$pct_abs" =~ ^[0-9]{3,} ]]; then
+                    log_message "Warning: Very large percentage: $change_percent, using default")
+                    change_percent=""
+                fi
+            fi
+        else
+            log_message "Warning: Invalid percentage format: $change_percent, using default")
+            change_percent=""
+        fi
+    fi
     
     # If we couldn't extract percentage but have change, use same sign
     if [ -z "$change_percent" ] && [ -n "$change" ]; then
@@ -141,18 +201,18 @@ scrape_gold_data() {
     
     # Use reasonable defaults if range not found
     if [ -z "$day_low" ] || [ -z "$day_high" ]; then
-        day_low=$(echo "$bid_price - 50" | bc 2>/dev/null || echo "0")
-        day_high=$(echo "$bid_price + 50" | bc 2>/dev/null || echo "0")
+        # Use bid price as reference for reasonable range
+        if [[ "$bid_price" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            day_low=$(echo "$bid_price - 10" | bc 2>/dev/null || echo "$bid_price")
+            day_high=$(echo "$bid_price + 10" | bc 2>/dev/null || echo "$bid_price")
+        else
+            day_low="0"
+            day_high="0"
+        fi
         log_message "Warning: Using calculated day range"
     fi
     
-    # Set defaults for change if not found
-    if [ -z "$change" ]; then
-        change="+0.00"
-        log_message "Warning: Using default change value"
-    fi
-    
-    # Ensure change has proper format
+    # Ensure change has proper format (clean up any duplicate signs)
     if [[ "$change" =~ ^[+-][+-] ]]; then
         # Remove duplicate signs (e.g., --8 becomes -8)
         change=$(echo "$change" | sed 's/^[+-]*\([0-9.-]*\)/\1/')
@@ -162,11 +222,6 @@ scrape_gold_data() {
         else
             change="+${change#+}"
         fi
-    fi
-    
-    if [ -z "$change_percent" ]; then
-        change_percent="${change_sign}0.00"
-        log_message "Warning: Using default change percent"
     fi
     
     # Ensure percentage has proper format
@@ -335,7 +390,7 @@ EOF
     
     # Execute the temporary insert
     if mysql $MYSQL_USER $MYSQL_PASS < "$temp_sql" 2>/dev/null; then
-        log_message "Successfully updated database"
+        log_message "Successfully updated database")
         rm -f "$temp_sql"
         return 0
     else
