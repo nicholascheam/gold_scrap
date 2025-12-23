@@ -1,5 +1,5 @@
 #!/bin/bash
-# gold_price_tracker.sh - Creates normalized tables with scraped data
+# gold_tracker_fixed.sh - Creates normalized tables with scraped data
 
 # Configuration
 URL="https://www.kitco.com/charts/livegold.html"
@@ -145,18 +145,18 @@ scrape_gold_data() {
         if [[ "$pct_abs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
             if command -v bc >/dev/null 2>&1; then
                 if (( $(echo "$pct_abs > 10" | bc -l) )); then
-                    log_message "Warning: Unreasonable percentage detected: $change_percent, using default")
+                    log_message "Warning: Unreasonable percentage detected: $change_percent, using default"
                     change_percent=""
                 fi
             else
                 # Fallback: check if it looks like a huge percentage
                 if [[ "$pct_abs" =~ ^[0-9]{3,} ]]; then
-                    log_message "Warning: Very large percentage: $change_percent, using default")
+                    log_message "Warning: Very large percentage: $change_percent, using default"
                     change_percent=""
                 fi
             fi
         else
-            log_message "Warning: Invalid percentage format: $change_percent, using default")
+            log_message "Warning: Invalid percentage format: $change_percent, using default"
             change_percent=""
         fi
     fi
@@ -390,7 +390,7 @@ EOF
     
     # Execute the temporary insert
     if mysql $MYSQL_USER $MYSQL_PASS < "$temp_sql" 2>/dev/null; then
-        log_message "Successfully updated database")
+        log_message "Successfully updated database"
         rm -f "$temp_sql"
         return 0
     else
