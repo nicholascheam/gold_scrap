@@ -50,5 +50,6 @@ INSERT INTO daily_ranges (date, day_low, day_high) VALUES
 
 -- Gold price observations (multiple per day)
 INSERT INTO gold_prices (timestamp, bid_price, ask_price, change_amount, change_percent, date, source) VALUES
-('2025-12-24 04:39:17', 4490.40, 4492.40, +47.80, +1.08, '2025-12-24', 'kitco');
+('2025-12-24 04:39:17', 4490.40, 4492.40, +47.80, +1.08, '2025-12-24', 'kitco'),
+('2025-12-24 04:42:03', 4489.00, 4491.00, +46.40, +1.04, '2025-12-24', 'kitco');
 

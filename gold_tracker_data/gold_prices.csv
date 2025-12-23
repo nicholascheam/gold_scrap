@@ -1,2 +1,3 @@
 date,timestamp,bid_price,ask_price,change_amount,change_percent,day_low,day_high,source
 2025-12-24,2025-12-24 04:39:17,4490.40,4492.40,+47.80,+1.08,4430.40,4498.60,kitco
+2025-12-24,2025-12-24 04:42:03,4489.00,4491.00,+46.40,+1.04,4430.40,4498.60,kitco
