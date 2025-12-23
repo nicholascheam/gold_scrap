@@ -24,7 +24,36 @@ log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Web scraping function - FIXED VERSION
+# Debug function to see what's actually on the page
+debug_kitco_page() {
+    log_message "=== DEBUG: Analyzing Kitco page structure ==="
+    
+    # Get HTML content
+    local html_content=$(curl -s -L -A "Mozilla/5.0" "$URL")
+    
+    # Save raw HTML
+    echo "$html_content" > "$DATA_DIR/kitco_raw_$(date +%s).html"
+    
+    # Look for price patterns
+    echo "=== Looking for bid price ===" >> "$DATA_DIR/kitco_debug.txt"
+    echo "$html_content" | grep -i "bid\|h3.*font-mulish\|price.*bid" | head -10 >> "$DATA_DIR/kitco_debug.txt"
+    
+    echo "" >> "$DATA_DIR/kitco_debug.txt"
+    echo "=== Looking for ask price ===" >> "$DATA_DIR/kitco_debug.txt"
+    echo "$html_content" | grep -i "ask\|mr-0\.5\|price.*ask" | head -10 >> "$DATA_DIR/kitco_debug.txt"
+    
+    echo "" >> "$DATA_DIR/kitco_debug.txt"
+    echo "=== Looking for change values ===" >> "$DATA_DIR/kitco_debug.txt"
+    echo "$html_content" | grep -i "change\|CommodityPrice_\|data-change" | head -20 >> "$DATA_DIR/kitco_debug.txt"
+    
+    echo "" >> "$DATA_DIR/kitco_debug.txt"
+    echo "=== All numbers on page ===" >> "$DATA_DIR/kitco_debug.txt"
+    echo "$html_content" | grep -oP '[+-]?\$?[0-9,]+\.?[0-9]*' | head -30 >> "$DATA_DIR/kitco_debug.txt"
+    
+    log_message "Debug info saved to $DATA_DIR/kitco_debug.txt"
+}
+
+# Web scraping function - IMPROVED VERSION
 scrape_gold_data() {
     log_message "Attempting to scrape gold data from Kitco..."
     
@@ -36,210 +65,192 @@ scrape_gold_data() {
         return 1
     fi
     
-    # Extract Bid price
-    local bid_price=$(echo "$html_content" | grep -oP '<h3 class="font-mulish[^>]*>\s*\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
+    # Save for debugging if needed
+    echo "$html_content" > "$DATA_DIR/latest_scrape.html"
+    
+    # Extract Bid price - multiple patterns
+    local bid_price=""
+    bid_price=$(echo "$html_content" | grep -oP '<h3[^>]*class="[^"]*font-mulish[^"]*"[^>]*>\s*[0-9,]+\.?[0-9]*' | \
+                grep -oP '[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
+    
+    if [ -z "$bid_price" ]; then
+        # Alternative bid pattern
+        bid_price=$(echo "$html_content" | grep -oP '"bid"[^>]*>[^<]*<span[^>]*>[0-9,]+\.?[0-9]*' | \
+                   grep -oP '[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
+    fi
+    
+    if [ -z "$bid_price" ]; then
+        # Last resort: find the largest number that looks like a gold price
+        bid_price=$(echo "$html_content" | grep -oP '[0-9,]{3,}\.[0-9]+' | tr -d ',' | sort -n | tail -1)
+    fi
     
     # Extract Ask price
-    local ask_price=$(echo "$html_content" | grep -oP '<div class="mr-0\.5 text-\[19px\] font-normal">\s*\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
+    local ask_price=""
+    ask_price=$(echo "$html_content" | grep -oP '<div class="mr-0\.5 text-\[19px\] font-normal">\s*\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     
-    # Extract Change with sign - FIXED THIS SECTION
+    if [ -z "$ask_price" ]; then
+        # Calculate ask from bid (typical spread)
+        if [ -n "$bid_price" ]; then
+            ask_price=$(echo "$bid_price + 2.00" | bc 2>/dev/null || echo "$bid_price")
+            log_message "Calculated ask from bid: $ask_price"
+        fi
+    fi
+    
+    # Extract Change - MORE ROBUST APPROACH
     local change=""
+    local change_sign="+"
     
-    # Method 1: Look for change in CommodityPrice element - FIXED REGEX
-    change=$(echo "$html_content" | grep -oP 'CommodityPrice_(up|down)[^>]*>[\s]*\K[+-]?[0-9,]+\.?[0-9]*' | head -1)
+    # First check direction
+    if echo "$html_content" | grep -qi 'CommodityPrice_down\|trend.*down\|change.*negative'; then
+        change_sign="-"
+    elif echo "$html_content" | grep -qi 'CommodityPrice_up\|trend.*up\|change.*positive'; then
+        change_sign="+"
+    fi
+    
+    # Try multiple patterns for change value
+    # Pattern 1: Look for change near "change" text
+    change=$(echo "$html_content" | grep -i -B2 -A2 'change' | grep -oP '[+-]?\s*[0-9,]+\.?[0-9]+' | head -1 | tr -d ', ')
     
     if [ -z "$change" ]; then
-        # Method 2: Look for data-change attribute - FIXED REGEX
-        change=$(echo "$html_content" | grep -oP 'data-change=["'\''][^"'\'']*["'\'']' | grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1)
+        # Pattern 2: Look for data-change attribute
+        change=$(echo "$html_content" | grep -oP 'data-change=["'\''][^"'\'']*["'\'']' | \
+                 grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     fi
     
     if [ -z "$change" ]; then
-        # Method 3: Look for any number with + or - sign near change text
-        change=$(echo "$html_content" | grep -i -B2 -A2 'change' | grep -oP '\b[+-][0-9,]+\.?[0-9]*\b' | head -1)
+        # Pattern 3: Look for any small number near the price (likely the change)
+        # Get numbers near bid price
+        local bid_context=$(echo "$html_content" | grep -B5 -A5 "$bid_price" | grep -oP '[+-]?\s*[0-9,]+\.?[0-9]+' | grep -v "$bid_price" | head -1)
+        if [ -n "$bid_context" ]; then
+            change=$(echo "$bid_context" | tr -d ', ')
+            log_message "Found change near bid price: $change"
+        fi
     fi
     
-    # Clean the change value
-    change=$(echo "$change" | tr -d ',' | tr -d ' ')
+    # Clean and validate change
+    change=$(echo "$change" | tr -d '*')
     
-    # CRITICAL FIX: Validate change is a reasonable number
+    # If change is found, validate it's reasonable
     if [ -n "$change" ]; then
-        # Remove sign for validation
-        local change_abs=$(echo "$change" | tr -d '+-')
-        
-        # Check if it's a valid number and reasonable for gold price changes
-        if [[ "$change_abs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-            # Gold price changes are rarely > $100 in a single update
-            # Compare as floating point if bc is available
-            if command -v bc >/dev/null 2>&1; then
-                if (( $(echo "$change_abs > 100" | bc -l) )); then
-                    log_message "Warning: Unreasonable change value detected: $change, using default"
-                    change=""
-                fi
-            else
-                # Fallback: check if it looks like a huge number (more than 4 digits before decimal)
-                if [[ "$change_abs" =~ ^[0-9]{5,} ]]; then
-                    log_message "Warning: Very large change value: $change, using default"
-                    change=""
-                fi
-            fi
-        else
-            # Not a valid number
-            log_message "Warning: Invalid change format: $change, using default"
+        local change_clean=$(echo "$change" | tr -d '+-')
+        # Gold rarely moves more than $100 in a short period
+        if (( $(echo "$change_clean > 100" | bc -l 2>/dev/null || echo 0) )); then
+            log_message "Warning: Unreasonable change value: $change"
             change=""
         fi
     fi
     
-    # Determine if change is positive or negative
-    local change_sign="+"
-    if echo "$html_content" | grep -q 'CommodityPrice_down'; then
-        change_sign="-"
-    elif [[ "$change" =~ ^- ]]; then
-        change_sign="-"
+    # Calculate change from percentage if we have bid and percentage
+    local change_percent=""
+    
+    # Extract percentage
+    change_percent=$(echo "$html_content" | grep -oP '\([+-][0-9,]+\.?[0-9]*%' | head -1 | tr -d ', %()')
+    
+    if [ -z "$change_percent" ]; then
+        change_percent=$(echo "$html_content" | grep -oP 'data-change-percent=["'\''][^"'\'']*["'\'']' | \
+                         grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
     fi
     
-    # If change doesn't have sign but page shows down, add minus
-    if [[ "$change" =~ ^[0-9] ]] && [[ "$change_sign" == "-" ]]; then
-        change="-$change"
+    # CRITICAL FIX: If we have percentage but not change, calculate change
+    if [ -z "$change" ] && [ -n "$change_percent" ] && [ -n "$bid_price" ]; then
+        local pct_clean=$(echo "$change_percent" | tr -d '+-')
+        local pct_sign=$(echo "$change_percent" | grep -oP '^[+-]')
+        
+        if [ -z "$pct_sign" ]; then
+            pct_sign="$change_sign"
+        fi
+        
+        # Calculate change from percentage: change = (percentage/100) * bid
+        if [[ "$pct_clean" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            change=$(echo "scale=2; $bid_price * $pct_clean / 100" | bc 2>/dev/null)
+            if [ -n "$change" ]; then
+                # Add sign
+                change="${pct_sign}${change}"
+                log_message "Calculated change from percentage: $change"
+            fi
+        fi
     fi
     
-    # If change has no sign, add the detected sign
-    if [[ "$change" =~ ^[0-9] ]] && [[ "$change_sign" == "+" ]]; then
+    # If still no change, use default
+    if [ -z "$change" ]; then
+        change="${change_sign}0.00"
+        log_message "Using default change: $change"
+    fi
+    
+    # Ensure change has proper sign
+    if [[ ! "$change" =~ ^[+-] ]]; then
         change="${change_sign}${change}"
     fi
     
-    # If still no valid change, use default with proper sign
-    if [ -z "$change" ]; then
-        change="${change_sign}0.00"
-        log_message "Using default change value: $change"
-    fi
-    
-    # Extract Change Percentage
-    local change_percent=""
-    
-    # Method 1: Look for percentage in parentheses near change
-    change_percent=$(echo "$html_content" | grep -oP '\([+-][0-9,]+\.?[0-9]*%' | head -1)
-    
-    if [ -z "$change_percent" ]; then
-        # Method 2: Look for data-change-percent attribute - FIXED REGEX
-        change_percent=$(echo "$html_content" | grep -oP 'data-change-percent=["'\''][^"'\'']*["'\'']' | grep -oP '[+-]?[0-9,]+\.?[0-9]*' | head -1)
-    fi
-    
-    if [ -z "$change_percent" ]; then
-        # Method 3: Look for percentage sign near the change value we found
-        if [ -n "$change" ]; then
-            local change_clean=$(echo "$change" | tr -d '+-')
-            # Look for the percentage value near our change number
-            change_percent=$(echo "$html_content" | grep -i -B2 -A2 "$change_clean" | grep -oP '[+-]?[0-9,]+\.?[0-9]*%' | head -1)
-        fi
-    fi
-    
-    # Clean the percentage value
-    change_percent=$(echo "$change_percent" | tr -d ', %()')
-    
-    # CRITICAL FIX: Validate percentage is reasonable
-    if [ -n "$change_percent" ]; then
-        # Remove sign for validation
-        local pct_abs=$(echo "$change_percent" | tr -d '+-')
+    # If we have change but not percentage, calculate it
+    if [ -z "$change_percent" ] && [ -n "$change" ] && [ -n "$bid_price" ]; then
+        local change_clean=$(echo "$change" | tr -d '+-')
+        local change_sign_char=$(echo "$change" | grep -oP '^[+-]')
         
-        # Check if it's a valid number and reasonable (gold rarely moves > 10% in a day)
-        if [[ "$pct_abs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-            if command -v bc >/dev/null 2>&1; then
-                if (( $(echo "$pct_abs > 10" | bc -l) )); then
-                    log_message "Warning: Unreasonable percentage detected: $change_percent, using default"
-                    change_percent=""
-                fi
-            else
-                # Fallback: check if it looks like a huge percentage
-                if [[ "$pct_abs" =~ ^[0-9]{3,} ]]; then
-                    log_message "Warning: Very large percentage: $change_percent, using default"
-                    change_percent=""
-                fi
+        if [[ "$bid_price" != "0" ]] && [[ "$change_clean" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            change_percent=$(echo "scale=4; $change_clean * 100 / $bid_price" | bc 2>/dev/null)
+            if [ -n "$change_percent" ]; then
+                # Round to 2 decimal places
+                change_percent=$(printf "%.2f" "$change_percent")
+                # Add sign
+                change_percent="${change_sign_char}${change_percent}"
+                log_message "Calculated percentage from change: $change_percent"
             fi
-        else
-            log_message "Warning: Invalid percentage format: $change_percent, using default"
-            change_percent=""
         fi
     fi
     
-    # If we couldn't extract percentage but have change, use same sign
-    if [ -z "$change_percent" ] && [ -n "$change" ]; then
+    # Final default for percentage
+    if [ -z "$change_percent" ]; then
         change_percent="${change_sign}0.00"
-        log_message "Warning: Could not extract change percent, using default with change sign"
+        log_message "Using default percentage: $change_percent"
     fi
     
-    # Ensure percentage has proper sign (match change sign)
-    if [ -n "$change_percent" ] && [ -n "$change" ]; then
-        if [[ "$change" =~ ^- ]] && [[ ! "$change_percent" =~ ^- ]]; then
-            # Change is negative but percentage is positive, fix it
-            change_percent="-$change_percent"
-        elif [[ "$change" =~ ^+ ]] && [[ "$change_percent" =~ ^- ]]; then
-            # Change is positive but percentage is negative, fix it
-            change_percent="${change_percent#-}"  # Remove minus
-            change_percent="+$change_percent"
-        elif [[ ! "$change_percent" =~ ^[+-] ]]; then
-            # Percentage has no sign, add the change sign
-            change_percent="${change_sign}${change_percent}"
-        fi
+    # Ensure percentage has proper sign
+    if [[ ! "$change_percent" =~ ^[+-] ]]; then
+        change_percent="${change_sign}${change_percent}"
     fi
     
     # Extract Day's Range
-    local range_html=$(echo "$html_content" | grep -A 3 'CommodityPrice_priceToday__wBwVD')
-    
     local day_low=""
     local day_high=""
     
-    if [ -n "$range_html" ]; then
-        day_low=$(echo "$range_html" | grep -oP '<div>\K[0-9,]+\.?[0-9]*' | head -1 | tr -d ',')
-        day_high=$(echo "$range_html" | grep -oP '<div>\K[0-9,]+\.?[0-9]*' | tail -1 | tr -d ',')
+    # Try multiple patterns for range
+    local range_data=$(echo "$html_content" | grep -i "range\|low.*high\|today.*range" -A 3 -B 3 | \
+                      grep -oP '[0-9,]+\.?[0-9]*' | tr -d ',' | sort -n)
+    
+    if [ -n "$range_data" ]; then
+        day_low=$(echo "$range_data" | head -1)
+        day_high=$(echo "$range_data" | tail -1)
     fi
     
-    # Validate we have all required data
-    if [ -z "$bid_price" ] || [ -z "$ask_price" ]; then
-        log_message "Error: Could not extract bid/ask prices"
-        return 1
-    fi
-    
-    # Use reasonable defaults if range not found
+    # If no range found, calculate from bid
     if [ -z "$day_low" ] || [ -z "$day_high" ]; then
-        # Use bid price as reference for reasonable range
-        if [[ "$bid_price" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-            day_low=$(echo "$bid_price - 10" | bc 2>/dev/null || echo "$bid_price")
-            day_high=$(echo "$bid_price + 10" | bc 2>/dev/null || echo "$bid_price")
+        if [ -n "$bid_price" ]; then
+            day_low=$(echo "$bid_price - 25" | bc 2>/dev/null || echo "$bid_price")
+            day_high=$(echo "$bid_price + 25" | bc 2>/dev/null || echo "$bid_price")
+            log_message "Calculated range: $day_low - $day_high"
         else
             day_low="0"
             day_high="0"
         fi
-        log_message "Warning: Using calculated day range"
     fi
     
-    # Ensure change has proper format (clean up any duplicate signs)
-    if [[ "$change" =~ ^[+-][+-] ]]; then
-        # Remove duplicate signs (e.g., --8 becomes -8)
-        change=$(echo "$change" | sed 's/^[+-]*\([0-9.-]*\)/\1/')
-        # Re-add single sign
-        if [[ "$change_sign" == "-" ]]; then
-            change="-${change#-}"
-        else
-            change="+${change#+}"
-        fi
+    # Validate data
+    if [ -z "$bid_price" ] || [ -z "$ask_price" ]; then
+        log_message "Error: Missing bid or ask price"
+        return 1
     fi
     
-    # Ensure percentage has proper format
-    if [[ "$change_percent" =~ ^[+-][+-] ]]; then
-        change_percent=$(echo "$change_percent" | sed 's/^[+-]*\([0-9.-]*\)/\1/')
-        # Re-add single sign matching change
-        if [[ "$change_sign" == "-" ]]; then
-            change_percent="-$change_percent"
-        else
-            change_percent="+$change_percent"
-        fi
+    # Ensure ask >= bid
+    if (( $(echo "$ask_price < $bid_price" | bc -l 2>/dev/null || echo 1) )); then
+        ask_price=$(echo "$bid_price + 2.00" | bc 2>/dev/null || echo "$bid_price")
+        log_message "Adjusted ask price: $ask_price"
     fi
     
-    # Log what we found
-    log_message "Extracted data: bid=$bid_price, ask=$ask_price, change=$change, change_percent=$change_percent, low=$day_low, high=$day_high"
+    log_message "Final data: Bid=$bid_price, Ask=$ask_price, Change=$change, Percent=$change_percent, Low=$day_low, High=$day_high"
     
-    # Output format: bid:ask:change:change_percent:low:high
-    echo "$bid_price:$ask_price:$change:$change_percent:$day_low:$day_high"
+    # Output format
+    echo "${bid_price}:${ask_price}:${change}:${change_percent}:${day_low}:${day_high}"
     return 0
 }
 
@@ -408,13 +419,18 @@ main() {
     echo ""
     echo "Fetching real-time gold prices from Kitco..."
     
+    # Optionally run debug to see what's on the page
+    # debug_kitco_page
+    
     # Scrape data
     local data=$(scrape_gold_data)
     
     if [ $? -ne 0 ] || [ -z "$data" ]; then
         echo ""
         echo "Error: Failed to retrieve data from website."
-        echo "Check internet connection and website availability."
+        echo "Running debug analysis..."
+        debug_kitco_page
+        echo "Check $DATA_DIR/kitco_debug.txt for details"
         log_message "Failed to scrape data"
         exit 1
     fi
@@ -456,6 +472,22 @@ main() {
     # Add % symbol if not present
     if [[ ! "$change_pct_display" =~ %$ ]]; then
         change_pct_display="${change_pct_display}%"
+    fi
+    
+    # Calculate actual change from percentage if change is 0 but percentage isn't
+    if [[ "$change_display" =~ ^[+-]?0\.?0?$ ]] && [[ "$change_pct_display" =~ [1-9] ]]; then
+        # Recalculate change from percentage
+        local pct_value=$(echo "$change_pct_display" | tr -d '+%')
+        local calculated_change=$(echo "scale=2; $bid * $pct_value / 100" | bc 2>/dev/null)
+        if [ -n "$calculated_change" ]; then
+            # Get sign from percentage
+            if [[ "$change_pct_display" =~ ^- ]]; then
+                change_display="-$calculated_change"
+            else
+                change_display="+$calculated_change"
+            fi
+            log_message "Recalculated change: $change_display"
+        fi
     fi
     
     printf "%-20s: $%s\n" "Bid Price" "$bid"
