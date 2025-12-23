@@ -46,10 +46,12 @@ CREATE TABLE gold_prices (
 
 -- Daily ranges (one per day)
 INSERT INTO daily_ranges (date, day_low, day_high) VALUES
-('2025-12-24', 4430.40, 4498.60);
+('2025-12-24', 4430.40, 4498.60),
+('2025-12-24', 4430.40, 4500.50);
 
 -- Gold price observations (multiple per day)
 INSERT INTO gold_prices (timestamp, bid_price, ask_price, change_amount, change_percent, date, source) VALUES
 ('2025-12-24 04:39:17', 4490.40, 4492.40, +47.80, +1.08, '2025-12-24', 'kitco'),
-('2025-12-24 04:42:03', 4489.00, 4491.00, +46.40, +1.04, '2025-12-24', 'kitco');
+('2025-12-24 04:42:03', 4489.00, 4491.00, +46.40, +1.04, '2025-12-24', 'kitco'),
+('2025-12-24 05:06:06', 4492.80, 4494.80, +50.20, +1.13, '2025-12-24', 'kitco');
 
